@@ -1,0 +1,302 @@
+-- Nikola Rados
+-- V00801209
+
+-- DROPS BEFORE RUN --
+drop table if exists student cascade;
+drop table if exists term cascade;
+drop table if exists course cascade;
+drop table if exists course_offering cascade;
+drop table if exists prerequisite cascade;
+drop table if exists enrolment cascade;
+
+drop function if exists id_name_mismatch_trigger();
+drop function if exists id_already_exists_trigger();
+drop function if exists capacity_reached_trigger() cascade;
+drop function if exists enrolment_failed_trigger();
+drop function if exists grade_update_trigger();
+drop function if exists course_delete_trigger();
+drop function if exists course_duplicate_trigger();
+drop function if exists term_duplicate_trigger();
+
+-- TABLES --
+create table student (
+	-- attributes --
+	student_id varchar(9), 
+	name varchar(255),
+	-- keys --
+	primary key (student_id),
+	-- checks --
+	check(length(student_id) = 9)
+);
+
+create table term (
+	-- attributes --
+	term_code int,
+	-- keys --
+	primary key (term_code)
+);
+
+create table course (
+	course_code varchar(10),
+	-- keys --
+	primary key (course_code),
+	-- checks --
+	check(length(course_code) > 0)
+);
+
+create table course_offering (
+	-- attributes --
+	course_code varchar(10), 
+	name varchar(128), 
+	term_code int, 
+	max_capacity int,
+	instructor_name varchar(255),
+	-- keys --
+	primary key (course_code, term_code),
+	foreign key (course_code) references course(course_code) 
+		on delete restrict
+		on update restrict,
+	foreign key (term_code) references term(term_code)
+		on delete restrict
+		on update restrict,
+	-- checks --
+	check(length(name) > 0),
+	check(max_capacity >= 0),
+	check(term_code >= 0),
+	check(length(instructor_name) > 0)
+);
+
+create table prerequisite (
+	-- attributes --
+	parent_course_code varchar(10),
+	parent_term_code int,
+	prereq_course_code varchar(10),
+	p_id serial,
+	-- keys --
+	primary key (p_id),
+	foreign key (parent_course_code, parent_term_code) references course_offering(course_code, term_code) 
+		on delete restrict
+		on update restrict,
+	foreign key (prereq_course_code) references course(course_code)
+		on delete restrict
+		on update restrict
+);
+
+create table enrolment (
+	-- attributes --
+	student_id varchar(9),
+	course_code varchar(10),
+	term_code int,
+	grade int,
+	-- keys --
+	primary key (student_id, course_code, term_code),
+	foreign key (student_id) references student(student_id)
+		on delete restrict
+		on update restrict,
+	foreign key (course_code, term_code) references course_offering(course_code, term_code)
+		on delete restrict
+		on update restrict,
+	-- checks --
+	check(grade >= 0),
+	check(grade <= 100)
+);
+
+-- TRIGGERS --
+-- Prevents the insertion of a student_id under a different name
+create function id_name_mismatch_trigger()
+returns trigger as
+$BODY$
+begin
+if (select count(*) 
+	from student 
+	where student_id = new.student_id
+	and name <> new.name) > 0
+then 
+	raise exception 'Cannot assign different name to same student_id';
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Prevents the insertion of a student row duplication
+create function id_already_exists_trigger()
+returns trigger as
+$BODY$
+begin
+if (select count(*) 
+	from student 
+	where student_id = new.student_id and
+	name = new.name) > 0
+then 
+	return null;
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Prevents insertion into enrolment when capacity is full
+create function capacity_reached_trigger()
+returns trigger as
+$BODY$
+begin
+if (select count(*) 
+	from enrolment 
+	where course_code = new.course_code and
+	term_code = new.term_code) 
+	>=
+	(select max_capacity
+	 from course_offering
+	 where course_code = new.course_code and
+	 term_code = new.term_code)
+then 
+	raise exception 'Course capacity has been reached';
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Prevents insertion into enrolment when prereqs have not been passed
+create function enrolment_failed_trigger()
+returns trigger as
+$BODY$
+begin
+if (with
+	taken as (select * from prerequisite where parent_course_code = new.course_code and parent_term_code = new.term_code),
+	counter as (select course_code, max(grade) as max_gradaroni 
+				from enrolment
+				inner join taken on course_code = prereq_course_code
+				where student_id = new.student_id and 
+					course_code = taken.prereq_course_code and 
+					(select count(*) from enrolment where course_code = taken.prereq_course_code and term_code < parent_term_code) > 0 and
+					grade >= 50 or grade is NULL
+					group by course_code)
+	select count(*) as c from counter) 
+--	+
+--	(select count(*) 
+--		from enrolment 
+--		inner join (select * 
+--						from prerequisite 
+--						where parent_course_code = new.course_code and 
+--						(select count(*) from enrolment where course_code = prereq_course_code and term_code < parent_term_code) > 0) as p on course_code = prereq_course_code 
+--		where student_id = new.student_id and grade is NULL)
+	<>
+	(select count(*) as num from prerequisite where parent_course_code = new.course_code and parent_term_code = new.term_code)
+then 
+	raise exception 'Prerequisites have not been met';
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Prevents update if student not enrolled in course
+create function grade_update_trigger()
+returns trigger as
+$BODY$
+begin
+if (select count(*) 
+		from enrolment 
+		where new.student_id = student_id and 
+			  new.course_code = course_code and 
+			  new.term_code = term_code) = 0
+then 
+	raise exception 'Cannot update grade';
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Prevents delete if student has a grade in the course
+create function course_delete_trigger()
+returns trigger as
+$BODY$
+begin
+if (select grade 
+		from enrolment 
+		where old.student_id = student_id and 
+			  old.course_code = course_code and 
+			  old.term_code = term_code) is not NULL
+then 
+	raise exception 'Cannot delete course with grade assigned';
+end if;
+return old;
+end
+$BODY$
+language plpgsql;
+
+-- Ignores the insertion of a course row duplication
+create function course_duplicate_trigger()
+returns trigger as
+$BODY$
+begin
+if (select count(*) 
+	from course 
+	where course_code = new.course_code) > 0
+then 
+	return null;
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Ignores the insertion of a term row duplication
+create function term_duplicate_trigger()
+returns trigger as
+$BODY$
+begin
+if (select count(*) 
+	from term 
+	where term_code = new.term_code) > 0
+then 
+	return null;
+end if;
+return new;
+end
+$BODY$
+language plpgsql;
+
+-- Run triggers --
+create trigger check_id_name_mismatch
+	before insert on student
+	for each row
+	execute procedure id_name_mismatch_trigger();
+
+create trigger check_id_exits
+	before insert on student
+	for each row
+	execute procedure id_already_exists_trigger();
+
+create trigger check_course_capacity
+	before insert on enrolment
+	for each row
+	execute procedure capacity_reached_trigger();
+
+create trigger enrolment_failed
+	before insert on enrolment
+	for each row
+	execute procedure enrolment_failed_trigger();
+
+create trigger grade_update
+	before update on enrolment
+	for each row
+	execute procedure grade_update_trigger();
+
+create trigger delete_course
+	before delete on enrolment
+	for each row
+	execute procedure course_delete_trigger();
+	
+create trigger duplicate_course
+	before insert on course
+	for each row
+	execute procedure course_duplicate_trigger();
+
+create trigger duplicate_term
+	before insert on term
+	for each row
+	execute procedure term_duplicate_trigger();
