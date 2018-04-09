@@ -1,8 +1,9 @@
 # create_courses.py
 # CSC 370 - Spring 2018 - Starter code for Assignment 4
-#
-#
 # B. Bird - 02/26/2018
+#
+# Nikola Rados
+# V00801209
 
 import sys, csv, psycopg2
 
@@ -17,7 +18,7 @@ psql_user = 'nrados' #Change this to your username
 psql_db = 'nrados' #Change this to your personal DB name
 psql_password = 'heheboi' #Put your password (as a string) here
 psql_server = 'studdb1.csc.uvic.ca'
-psql_port = 55555
+psql_port = 5432
 
 conn = psycopg2.connect(dbname=psql_db, user=psql_user, password=psql_password, host=psql_server, port=psql_port)
 
@@ -30,16 +31,18 @@ with open(input_filename) as f:
 		if len(row) < 4:
 			print("Error: Invalid input line \"%s\""%(','.join(row)), file=sys.stderr)
 			#Maybe abort the active transaction and roll back at this point?
+			conn.rollback()
 			break
 		code, name, term, instructor, capacity = row[0:5]
 		prerequisites = row[5:] #List of zero or more items
 
 		#Do something with the data here
 		try:
-			cursor.execute("insert into course values( %s );", (code) )
-			cursor.execute("insert into course_offering values( %s, %s, %d, %d, %s );", (code, name, term, capacity, instructor) )
+			cursor.execute("insert into course values( %s );", [code])
+			cursor.execute("insert into term values( %s );", [term])
+			cursor.execute("insert into course_offering values( %s, %s, %s, %s, %s );", [code, name, term, capacity, instructor] )
 			for course in prerequisites:
-				cursor.execute("insert into prerequisites values( %s, %d, %s );", (code, term, course) )
+				cursor.execute("insert into prerequisite values( %s, %s, %s );", [code, term, course] )
 			conn.commit() #Only commit if no error occurs (commit will actually be prevented if an error occurs anyway)
 		#Make sure to catch any exceptions that occur and roll back the transaction if a database error occurs.
 		except psycopg2.ProgrammingError as err:
@@ -59,5 +62,4 @@ with open(input_filename) as f:
 			print("Caught an IntegrityError:",file=sys.stderr)
 			print(err,file=sys.stderr)
 			conn.rollback()
-
-		cursor.close()
+cursor.close()
